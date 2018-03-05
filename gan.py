@@ -28,64 +28,83 @@ def pickle_dump(model, path):
 
         
 class BaseGanModel:
+    """ This class is a basic Gan model
     
-    def __init__(self, noise_dimension=100, output_size=784, generator_activation='tanh',
-                 discriminator_dropout=0.3, discriminant_likeness=0.9):
-        self.noise_dimension = noise_dimension
-        self.output_size = output_size
-        self.generator_activation = generator_activation
-        self.discriminator_dropout = discriminator_dropout
-        self.optimizer = Adam(lr=0.0002, beta_1=0.5)
+    it is possible to change the discriminant and generator directly.
+    
+    label_noise::float apply noise during the training of the discriminator to avoid overfitting 
+                       allow the generator to have more diversity.
+    
+    separate_fit::boolean fit the discriminator on the true and fake observation separatly.
+    """
+    
+    def __init__(self, label_noise=0, separate_fit=False):
+        self.label_noise = label_noise
+        self.separate_fit = separate_fit
         self.generator = None
         self.discriminator = None
         self.gan_model = None
         self.discriminator_losses = None
         self.generator_losses = None
-        self.discriminant_likeness = discriminant_likeness
         
-    def init_model(self):
-        self.generator = self._create_generator(self.generator_activation)
-        self.discriminator = self._create_discriminator(self.discriminator_dropout)
+    def init_model(self, noise_dimension=100, output_size=784):
+        """ init a Gan model using the function _create_generator and _create_discriminant
+        
+        noise_dimension::int input dimension of the generator
+        
+        output_size::int output of the generator and input of the discriminator
+        """
+        self.generator = self._create_generator(noise_dimension, output_size)
+        self.discriminator = self._create_discriminator(output_size)
         self.gan_model = self._combine_generator_discriminator()
         self.discriminator_losses = []
         self.generator_losses = []
+        return self
         
-    def _create_generator(self, activation):
+    def _create_generator(self, noise_dimension, output_size):
         # basic generator model
         generator = Sequential()
-        generator.add(Dense(256, input_dim=self.noise_dimension, 
+        generator.add(Dense(256, input_dim=noise_dimension, 
                             kernel_initializer=initializers.RandomNormal(stddev=0.02)))
         generator.add(LeakyReLU(0.2))
-        generator.add(Dense(self.output_size, activation=activation))
-        generator.compile(loss='binary_crossentropy', optimizer=self.optimizer)
+        generator.add(Dense(output_size, activation='tanh'))
+        generator.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.0002, beta_1=0.5))
         return generator
     
-    def _create_discriminator(self, dropout):
+    def _create_discriminator(self, output_size):
         # discriminator model
         discriminator = Sequential()
-        discriminator.add(Dense(1024, input_dim=self.output_size, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
+        discriminator.add(Dense(1024, input_dim=output_size, 
+                                kernel_initializer=initializers.RandomNormal(stddev=0.02)))
         discriminator.add(LeakyReLU(0.2))
-        discriminator.add(Dropout(dropout))
+        discriminator.add(Dropout(0.3))
         discriminator.add(Dense(1, activation='sigmoid'))
-        discriminator.compile(loss='binary_crossentropy', optimizer=self.optimizer)
+        discriminator.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.0002, beta_1=0.5))
         return discriminator
     
     def _combine_generator_discriminator(self):
         # Combined network
         self.discriminator.trainable = False
-        ganInput = Input(shape=(self.noise_dimension,))
+        ganInput = Input(shape=(self.generator.get_input_at(0).get_shape()[1].value,))
         x = self.generator(ganInput)
         ganOutput = self.discriminator(x)
         gan = Model(inputs=ganInput, outputs=ganOutput)
-        gan.compile(loss='binary_crossentropy', optimizer=self.optimizer)
+        gan.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.0002, beta_1=0.5))
         return gan
     
     def load_model(self, generator_pickle_path, discriminator_pickle_path):
+        """ load a model using pickle of the generator and discriminator
+        
+        generator_pickle_path::String  path of the generator pickle
+        
+        discriminator_pickle_path::String path of the discriminator pickle
+        """
         generator = pickle_load(generator_pickle_path)
         discriminator = pickle_load(discriminator_pickle_path)
         self.edit_model(generator, discriminator)
         
     def edit_model(self, generator, discriminator):
+        """ edit a model with a new generator and discriminator """
         self.generator = generator
         self.discriminator = discriminator
         self.gan_model = self._combine_generator_discriminator()
@@ -93,12 +112,22 @@ class BaseGanModel:
         self.generator_losses = []
     
     def save_model(self, generator_pickle_path, discriminator_pickle_path):
+        """ save a model using pickle of the generator and discriminator
+        
+        generator_pickle_path::String  path of the generator pickle
+        
+        discriminator_pickle_path::String path of the discriminator pickle
+        """
         pickle_dump(self.generator, generator_pickle_path)
         pickle_dump(self.discriminator, discriminator_pickle_path)
         
     def generate(self, batch_size):
-        # Generate fake samples using generator
-        noise = np.random.normal(0, 1, size=[batch_size, self.noise_dimension])
+        """ Generate fake samples using generator
+        
+        batch_size::int number of observation to generate
+        """
+        noise = np.random.normal(0, 1, size=[batch_size, 
+                                             self.generator.get_input_at(0).get_shape()[1].value])
         return self.generator.predict(noise)
         
     def _fit_discriminator(self, X_train_batch):
@@ -110,10 +139,16 @@ class BaseGanModel:
         
         # Labels for generated and real data
         y_discriminant = np.zeros(2 * batch_size)
-        y_discriminant[:batch_size] = self.discriminant_likeness
+        y_discriminant[:batch_size] = 1
+        y_discriminant = np.maximum(0, y_discriminant + self.label_noise * 
+                                    np.random.uniform(-1, 1, 2*batch_size))
 
         self.discriminator.trainable = True
-        dis_loss = self.discriminator.train_on_batch(X, y_discriminant)
+        if self.separate_fit:
+            dis_loss = self.discriminator.train_on_batch(X[:batch_size], y_discriminant[:batch_size])
+            dis_loss = self.discriminator.train_on_batch(X[batch_size:], y_discriminant[batch_size:])
+        else:
+            dis_loss = self.discriminator.train_on_batch(X, y_discriminant)
         self.discriminator.trainable = False
         return dis_loss
         
@@ -124,50 +159,69 @@ class BaseGanModel:
         gen_loss = self.gan_model.train_on_batch(noise, y_generator)
         return gen_loss
     
-    def fit(self, X_train, y_train, epochs=100, batch_size=128):
+    def fit(self, X, y=None, epochs=100, batch_size=128):
+        """
+        fit a gan model by alternating between the training of the discriminator and generator
+        
+        X::array like observations to imitate
+        
+        epochs::int number of batches to execute
+        
+        batch_size::int size of a batch
+        """
         if self.generator is None or self.discriminator is None or self.gan_model is None:
             raise ValueError("model is not intialized correctly, please call init_model")
             
 
         for _ in tqdm(range(1, epochs+1), leave=False):
             # train discriminator and generator
-            X_train_batch = X_train[np.random.randint(0, X_train.shape[0], size=batch_size)]
-            dis_loss = self._fit_discriminator(X_train_batch)
+            X_batch = X_train[np.random.randint(0, X.shape[0], size=batch_size)]
+            dis_loss = self._fit_discriminator(X_batch)
             gen_loss = self._fit_generator(batch_size)
             
             # store loss
             self.discriminator_losses.append(dis_loss)
             self.generator_losses.append(gen_loss)
+        
+        return self
     
 
 class MnistGanModel(BaseGanModel):
+    """ This class is a Mnist Gan model
     
-    def _create_generator(self, activation):
+    label_noise::float apply noise during the training of the discriminator to avoid overfitting 
+                       allow the generator to have more diversity.
+    
+    separate_fit::boolean fit the discriminator on the true and fake observation separatly.
+    """
+    
+    def _create_generator(self, noise_dimension, output_size):
         # generator model
         generator = Sequential()
-        generator.add(Dense(256, input_dim=self.noise_dimension, 
+        generator.add(Dense(256, input_dim=noise_dimension, 
                             kernel_initializer=initializers.RandomNormal(stddev=0.02)))
         generator.add(LeakyReLU(0.2))
         generator.add(Dense(512))
         generator.add(LeakyReLU(0.2))
         generator.add(Dense(1024))
         generator.add(LeakyReLU(0.2))
-        generator.add(Dense(self.output_size, activation=activation))
-        generator.compile(loss='binary_crossentropy', optimizer=self.optimizer)
+        generator.add(Dense(output_size, activation='tanh'))
+        generator.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.0002, beta_1=0.5))
         return generator
     
-    def _create_discriminator(self, dropout):
+    def _create_discriminator(self, output_size):
         # discriminator model
         discriminator = Sequential()
-        discriminator.add(Dense(1024, input_dim=self.output_size, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
+        discriminator.add(Dense(1024, input_dim=output_size, 
+                                kernel_initializer=initializers.RandomNormal(stddev=0.02)))
         discriminator.add(LeakyReLU(0.2))
-        discriminator.add(Dropout(dropout))
+        discriminator.add(Dropout(0.3))
         discriminator.add(Dense(512))
         discriminator.add(LeakyReLU(0.2))
-        discriminator.add(Dropout(dropout))
+        discriminator.add(Dropout(0.3))
         discriminator.add(Dense(256))
         discriminator.add(LeakyReLU(0.2))
-        discriminator.add(Dropout(dropout))
+        discriminator.add(Dropout(0.3))
         discriminator.add(Dense(1, activation='sigmoid'))
-        discriminator.compile(loss='binary_crossentropy', optimizer=self.optimizer)
+        discriminator.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.0002, beta_1=0.5))
         return discriminator
